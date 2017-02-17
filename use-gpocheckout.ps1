@@ -9,12 +9,16 @@
 
 .DESCRIPTION
    The idea here is that every admin will have one or multiple 'DEV' gpos to edit settings.  The process will be as follows
+   This is for the check out function
    1. get the gpo name you are trying to edit from parameter
    2. Use global variable to make each user have their own dev GPO
    3. When a GPO is 'checked out' it will be set permissions so only the user currently editing the GPO has modify access. This makes it so another user cannot edit the GPO at the same time. 
    4. If a user attempts to 'check out' a gpo that does not have their username directly in the ACL or the Global variable GPO admin group they will get an error stating that the GPO is currently being edited and spit out the current ACL.
-   5. If the gpo gets 'checked out' then the script will copy the full settings of the GPO to the users 'DEVGPO'
-   6. 
+   5. If the gpo gets 'checked out' then the script will copy the full settings of the GPO to the users 'DEVGPO'else the script will return the GPO is in use and list the current ACL and end there
+   6. The script will get the gpinheritance of the source OU and make sure that all the same policies are linked with your dev GPO in place of the GPO you are attempting to edit
+   
+    This is for the check in function
+    1. backup the dev gpo and import to GPO you are editing.  
 
 .EXAMPLE
    Example of how to use this cmdlet
@@ -55,18 +59,41 @@ function Verb-Noun
         [Alias("check")] 
         $check,
 
-        # Param2 help description
-        [Parameter(ParameterSetName='Parameter Set 1')]
-
-        [ValidateScript({$true})]
+        # This is the domain you are trying to edit the gpo in. THis is only necessary in environments with multiple domains
+        [Parameter(Mandatory=$true, 
+                   ValueFromPipeline=$true,
+                   ValueFromPipelineByPropertyName=$true, 
+                   ValueFromRemainingArguments=$false, 
+                   Position=0)]
+        [ValidateScript({get-addomain -identity $_})]
         $DOMAIN,
 
-        # Param3 help description
-        [Parameter(ParameterSetName='Another Parameter Set')]
-        [ValidatePattern("[a-z]*")]
-        [ValidateLength(0,15)]
-        [String]
-        $Param3
+        # This is the name of the gpo you are trying to edit.  
+        [Parameter(Mandatory=$true, 
+                   ValueFromPipeline=$true,
+                   ValueFromPipelineByPropertyName=$true, 
+                   ValueFromRemainingArguments=$false, 
+                   Position=0)]
+        [ValidateScript({get-gpo -name $_ -domain $domain })]
+        $EditGPO,
+
+        # The OU where you are copying the GPO from
+        [Parameter(Mandatory=$true,
+                   ValueFromPipelineByPropertyName=$true,
+                   Position=0)]
+        [ValidateScript({Get-ADOrganizationalUnit -Identity $_ -Server $domain })]
+        $SourceOU,
+
+        # This is the name of the OU you will be testing in.  
+        [Parameter(Mandatory=$true, 
+                   ValueFromPipeline=$true,
+                   ValueFromPipelineByPropertyName=$true, 
+                   ValueFromRemainingArguments=$false, 
+                   Position=0)]
+        [ValidateScript({Get-ADOrganizationalUnit -Identity $_ -Server $domain }})]
+        $TargetOU
+
+
     )
 
     Begin
