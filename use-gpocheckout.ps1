@@ -57,7 +57,7 @@ function use-gpocheckout
         [ValidateSet("CheckIn", "CheckOut")]
         $check,
 
-       # This is the domain you are trying to edit the gpo in. THis is only necessary in environments with multiple domains
+       # This is the domain your source gpo is in
         [Parameter(Mandatory=$true, 
                    ValueFromPipeline=$true,
                    ValueFromPipelineByPropertyName=$true, 
@@ -82,6 +82,7 @@ function use-gpocheckout
         [ValidateScript({Get-ADOrganizationalUnit -Identity $_ -Server $SourceDomain  })]
         $SourceOU,
 
+        #the domain where your editing gpo resides
         [Parameter(Mandatory=$true, 
                    ValueFromPipeline=$true,
                    ValueFromPipelineByPropertyName=$true, 
@@ -98,6 +99,16 @@ function use-gpocheckout
                    Position=0)]
         [ValidateScript({Get-ADOrganizationalUnit -Identity $_ -Server $TargetDomain })]
         $TargetOU,
+
+        # This is the name of the security group you are targeting the GPO to.  
+        [Parameter(Mandatory=$false, 
+                   ValueFromPipeline=$true,
+                   ValueFromPipelineByPropertyName=$true, 
+                   ValueFromRemainingArguments=$false, 
+                   Position=0)]
+        [ValidateScript({Get-ADOrganizationalUnit -Identity $_ -Server $TargetDomain })]
+        $TargetingGroup,
+
 
         # This is the name of the gpo you are trying to edit.  
         [Parameter(Mandatory=$true, 
@@ -121,42 +132,60 @@ function use-gpocheckout
     }
     Process
     {
-        
-        if($check -eq "CheckOut"){
-        #
-        backup-gpo -Name $SourceGPO -Path $GPOPath -Domain $SourceDomain 
-        import-gpo -BackupGpoName $SourceGPO -Path $GPOPath -TargetName $TargetGPO -Domain $TargetDomain
+        #set variables for use later
         $GPOS = Get-GPInheritance -Target $sourceOU -Domain $SourceDomain
         $InheritedGPOs = $gpos.InheritedGpoLinks.displayname
         $LocalGPOs = $gpos.GpoLinks.displayname
-        Foreach($InheritedGPO in $InheritedGPOs){
-            if( -not ( get-gpo -Name $inheritedGPO -Domain $TargetDomain)){
-                Copy-GPO -SourceName $InheritedGPO -TargetName $inheritedGPO -SourceDomain $sourcedomain -TargetDomain $targetdomain -CopyAcl
-                New-GPLink -Name $InheritedGPO -Target $TargetOU -Domain $TargetDomain
-                }
-            if( get-gpo -Name $inheritedGPO -Domain $TargetDomain){
-                New-GPLink -Name $InheritedGPO -Target $TargetOU -Domain $TargetDomain
-                }
+
+        if($check -eq "CheckOut"){
+        #this section gets all the gpos applied to the OU you are editing in and links them to your DEV OU with the correct permissions
+        backup-gpo -Name $SourceGPO -Path $GPOPath -Domain $SourceDomain 
+        import-gpo -BackupGpoName $SourceGPO -Path $GPOPath -TargetName $TargetGPO -Domain $TargetDomain
+        Set-GPPermissions -Name $TargetGPO -PermissionLevel GpoRead -TargetName 'Authenticated users' -TargetType Group
+
+        Foreach($InheritedGPO in $InheritedGPOs){ 
+                if(-not ($InheritedGPO -eq $SourceGPO)){
+                    Copy-GPO -SourceName $InheritedGPO  -TargetName $inheritedGPO+ '-dev' -SourceDomain $sourcedomain -TargetDomain $targetdomain -CopyAcl
+                    New-GPLink -Name $InheritedGPO + '-dev' -Target $TargetOU -Domain $TargetDomain
+                    }
             }
 
         Foreach($LocalGPO in $LocalGPOs){
-            if( -not ( get-gpo -Name $localGPO -Domain $TargetDomain)){
-                Copy-GPO -SourceName $localGPO -TargetName $localGPO -SourceDomain $sourcedomain -TargetDomain $targetdomain -CopyAcl
-                New-GPLink -Name $localGPO -Target $TargetOU -Domain $TargetDomain
-                }
-            if(get-gpo -Name $localGPO -Domain $TargetDomain){
-                New-GPLink -Name $localGPO -Target $TargetOU -Domain $TargetDomain
-                }
+                if(-not ($LocalGPO -eq $SourceGPO)){
+                    Copy-GPO -SourceName $localGPO -TargetName $localGPO + '-dev' -SourceDomain $sourcedomain -TargetDomain $targetdomain -CopyAcl
+                    New-GPLink -Name $localGPO + '-dev' -Target $TargetOU -Domain $TargetDomain
+                    } 
             }
-        if(Set-GPLink -Name $SourceGPO -Target $TargetOU -Domain $TargetDomain){
-                Remove-GPLink -Name $SourceGPO -Target $TargetOU -Domain $TargetDomain
+        if(Set-GPLink -Name $SourceGPO + '-dev' -Target $TargetOU -Domain $TargetDomain){
+                Remove-GPLink -Name $SourceGPO + '-dev' -Target $TargetOU -Domain $TargetDomain
                 }
+        #this is where the GPO is checked out.  When you remove the GPO admin group it wont allow another user to edit the GPO
         Set-GPPermissions -Name $sourceGPO -TargetName $admin -TargetType User -PermissionLevel GpoEditDeleteModifySecurity -Server $SourceDomain
-        Set-GPPermissions -Name $sourceGPO -TargetName $GPOADMIN -TargetType Group -PermissionLevel None -Server $SourceDomain
+        Set-GPPermissions -Name $sourceGPO -TargetName $GPOADMIN -TargetType Group -PermissionLevel GpoRead -Server $SourceDomain
+        if($TargetingGroup){
+            Set-GPPermissions -Name $targetGPO -TargetName $TargetingGroup -PermissionLevel GpoApply -TargetType Group -DomainName $TargetDomain
+            }
         }
 
         if($check -eq "CheckIn"){
-        #
+            #backup all edited gpos and source gpos in case a roll back is necessary
+            Backup-GPO -Name $targetGPO -Path $GPOPath -Domain $targetdomain
+            backup-gpo -Name $sourceGPO -Path $gpopath -domain $SourceDomain
+            #import settings from edited GPO and apply correct permissions to the updated GPO
+            import-gpo -BackupGpoName $targetgpo -Path $gpopath -TargetName $sourceGPO -Domain $SourceDomain -CreateIfNeeded
+            Set-GPPermissions -Name $sourceGPO -TargetName $GPOADMIN -TargetType Group -PermissionLevel GpoEditDeleteModifySecurity -Server $SourceDomain
+            Set-GPPermissions -Name $sourcegpo -TargetName 'authenticated users' -TargetType Group -PermissionLevel GpoRead -DomainName $SourceDomain
+            if($TargetingGroup){
+                Set-GPPermissions -Name $sourceGPO -TargetName $TargetingGroup -PermissionLevel GpoApply -TargetType Group -DomainName $sourceDomain
+                }
+                #remove all copied GPOs from your dev OU
+            Foreach($InheritedGPO in $InheritedGPOs){
+                Remove-GPO -Name $InheritedGPO + '-dev' -Domain $TargetDomain
+                }
+            Foreach($LocalGPO in $LocalGPOs){
+                Remove-GPO -Name $LocalGPO + '-dev' -Domain $TargetDomain
+                }
+            }
         }
     }
     End
