@@ -57,7 +57,7 @@ function use-gpocheckout
         [ValidateSet("CheckIn", "CheckOut")]
         $check,
 
-       # This is the domain you are trying to edit the gpo in. THis is only necessary in environments with multiple domains
+       # This is the domain your source gpo is in
         [Parameter(Mandatory=$true, 
                    ValueFromPipeline=$true,
                    ValueFromPipelineByPropertyName=$true, 
@@ -82,6 +82,7 @@ function use-gpocheckout
         [ValidateScript({Get-ADOrganizationalUnit -Identity $_ -Server $SourceDomain  })]
         $SourceOU,
 
+        #the domain where your editing gpo resides
         [Parameter(Mandatory=$true, 
                    ValueFromPipeline=$true,
                    ValueFromPipelineByPropertyName=$true, 
@@ -98,6 +99,16 @@ function use-gpocheckout
                    Position=0)]
         [ValidateScript({Get-ADOrganizationalUnit -Identity $_ -Server $TargetDomain })]
         $TargetOU,
+
+        # This is the name of the security group you are targeting the GPO to.  
+        [Parameter(Mandatory=$false, 
+                   ValueFromPipeline=$true,
+                   ValueFromPipelineByPropertyName=$true, 
+                   ValueFromRemainingArguments=$false, 
+                   Position=0)]
+        [ValidateScript({Get-ADOrganizationalUnit -Identity $_ -Server $TargetDomain })]
+        $TargetingGroup,
+
 
         # This is the name of the gpo you are trying to edit.  
         [Parameter(Mandatory=$true, 
@@ -121,18 +132,21 @@ function use-gpocheckout
     }
     Process
     {
-        
-        if($check -eq "CheckOut"){
-        #
-        backup-gpo -Name $SourceGPO -Path $GPOPath -Domain $SourceDomain 
-        import-gpo -BackupGpoName $SourceGPO -Path $GPOPath -TargetName $TargetGPO -Domain $TargetDomain
+        #set variables for use later
         $GPOS = Get-GPInheritance -Target $sourceOU -Domain $SourceDomain
         $InheritedGPOs = $gpos.InheritedGpoLinks.displayname
         $LocalGPOs = $gpos.GpoLinks.displayname
+
+        if($check -eq "CheckOut"){
+        #this section gets all the gpos applied to the OU you are editing in and links them to your DEV OU with the correct permissions
+        backup-gpo -Name $SourceGPO -Path $GPOPath -Domain $SourceDomain 
+        import-gpo -BackupGpoName $SourceGPO -Path $GPOPath -TargetName $TargetGPO -Domain $TargetDomain
+        Set-GPPermissions -Name $TargetGPO -PermissionLevel GpoRead -TargetName 'Authenticated users' -TargetType Group
+
         Foreach($InheritedGPO in $InheritedGPOs){
             if( -not ( get-gpo -Name $inheritedGPO -Domain $TargetDomain)){
-                Copy-GPO -SourceName $InheritedGPO -TargetName $inheritedGPO -SourceDomain $sourcedomain -TargetDomain $targetdomain -CopyAcl
-                New-GPLink -Name $InheritedGPO -Target $TargetOU -Domain $TargetDomain
+                Copy-GPO -SourceName $InheritedGPO + '-dev' -TargetName $inheritedGPO -SourceDomain $sourcedomain -TargetDomain $targetdomain -CopyAcl
+                New-GPLink -Name $InheritedGPO + '-dev' -Target $TargetOU -Domain $TargetDomain
                 }
             if( get-gpo -Name $inheritedGPO -Domain $TargetDomain){
                 New-GPLink -Name $InheritedGPO -Target $TargetOU -Domain $TargetDomain
@@ -151,12 +165,32 @@ function use-gpocheckout
         if(Set-GPLink -Name $SourceGPO -Target $TargetOU -Domain $TargetDomain){
                 Remove-GPLink -Name $SourceGPO -Target $TargetOU -Domain $TargetDomain
                 }
+        #this is where the GPO is checked out.  When you remove the GPO admin group it wont allow another user to edit the GPO
         Set-GPPermissions -Name $sourceGPO -TargetName $admin -TargetType User -PermissionLevel GpoEditDeleteModifySecurity -Server $SourceDomain
         Set-GPPermissions -Name $sourceGPO -TargetName $GPOADMIN -TargetType Group -PermissionLevel None -Server $SourceDomain
+        if($TargetingGroup){
+            Set-GPPermissions -Name $targetGPO -TargetName $TargetingGroup -PermissionLevel GpoApply -TargetType Group -DomainName $TargetDomain
+            }
         }
 
         if($check -eq "CheckIn"){
-        #
+        if($TargetDomain -eq $SourceDomain){
+            Foreach($InheritedGPO in $InheritedGPOs){
+                Remove-GPLink -Name $InheritedGPO -Target $TargetOU -Domain $TargetDomain
+                }
+            Foreach($LocalGPO in $LocalGPOs){
+                Remove-GPLink -Name $LocalGPO -Target $TargetOU -Domain $TargetDomain
+                }
+            }
+        if(-not ($TargetDomain -eq $SourceDomain{
+            Foreach($InheritedGPO in $InheritedGPOs){
+                Remove-GPO -Name $inheritedGPO -Domain $TargetDomain -
+                Remove-GPO -Name $InheritedGPO -Target $TargetOU -Domain $TargetDomain
+                }
+            Foreach($LocalGPO in $LocalGPOs){
+                Remove-GPLink -Name $LocalGPO -Target $TargetOU -Domain $TargetDomain
+                }
+            }
         }
     }
     End
